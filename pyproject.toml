@@ -1,0 +1,29 @@
+[project]
+name = "residyn-pc"
+version = "0.1.0"
+description = "완충재 동탄성계수 측정기 (PC) — Fly-ADXL345-USB 호스트"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyserial>=3.5",
+    "reportlab>=4.0",
+    "PySide6-Essentials>=6.6",
+    "pyqtgraph>=0.13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+residyn = "residyn.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["residyn*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
