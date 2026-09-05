@@ -37,6 +37,7 @@ from ..analysis import AnalysisConfig, AnalysisResult, analyze
 from ..criteria import Grade, convert_48h, grade
 from ..protocol import DataFrame
 from ..serial_link import SerialLink, list_serial_ports
+from .firmware_dialog import FirmwareDialog
 from .meta_dialog import MetaDialog
 
 RB_CAPACITY = 96_000          # 3200 Hz × 30초
@@ -150,6 +151,14 @@ class MainWindow(QMainWindow):
 
         self.odr_label = QLabel("실측 ODR : —")
         dl.addWidget(self.odr_label)
+
+        # 측정 중 여부와 무관하게 항상 누를 수 있다. 장치가 BOOTSEL 상태로
+        # 꽂혀 있으면 포트가 아예 없는데, 그때가 바로 업데이트가 필요한
+        # 상황이다.
+        self.btn_firmware = QPushButton("펌웨어 업데이트")
+        self.btn_firmware.clicked.connect(self.update_firmware)
+        dl.addWidget(self.btn_firmware)
+
         layout.addWidget(dev)
 
         # 조건
@@ -277,6 +286,21 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self._chart_timer.start()
         self._status(f"측정 중 — {device}")
+
+    def update_firmware(self) -> None:
+        """펌웨어 업데이트 창을 연다.
+
+        측정 중이면 먼저 멈춘다 — 부트로더 진입 매직을 보내려면 포트가 비어
+        있어야 하고, 어차피 장치가 곧 재부팅하므로 리더 스레드를 살려 둘
+        이유가 없다.
+        """
+        if self.link is not None and self.link.is_open:
+            self.stop_measure()
+
+        port = self.port_combo.currentData()
+        dlg = FirmwareDialog(port, self)
+        dlg.exec()
+        self.refresh_ports()
 
     def stop_measure(self) -> None:
         self._chart_timer.stop()
