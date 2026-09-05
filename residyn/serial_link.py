@@ -95,7 +95,12 @@ class SerialLink:
 
     @property
     def measured_odr_hz(self) -> float | None:
+        """평균 실측 ODR. 창 하나가 아니라 연결 이후 받은 전부의 평균이다."""
         return self.parser.measured_odr_hz
+
+    @property
+    def odr_windows(self) -> int:
+        return self.parser.odr_windows
 
     def open(self) -> None:
         self.parser.reset()

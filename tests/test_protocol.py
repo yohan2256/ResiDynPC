@@ -7,6 +7,8 @@
 
 import struct
 
+import numpy as np
+
 import pytest
 
 from residyn.protocol import (
@@ -41,6 +43,57 @@ def test_status_frame_sets_measured_odr():
     p = FrameParser()
     p.feed(status_frame(3187.421))
     assert p.measured_odr_hz == pytest.approx(3187.421, abs=1e-3)
+
+
+def test_measured_odr_averages_windows_rather_than_taking_the_last():
+    """창 하나에는 경계 오차가 있다. 평균이라야 그 오차가 씻긴다."""
+    p = FrameParser()
+    for hz in (3185.0, 3190.0, 3186.0, 3189.0):
+        p.feed(status_frame(hz))
+
+    assert p.odr_windows == 4
+    assert p.last_odr_hz == pytest.approx(3189.0, abs=1e-3)
+    assert p.measured_odr_hz == pytest.approx(3187.5, abs=1e-3)
+
+
+def test_averaging_pulls_a_noisy_stream_toward_the_true_rate():
+    """창별 랜덤 오차는 1/√N로 줄어든다 — 마지막 값 하나보다 반드시 낫다."""
+    rng = np.random.default_rng(20260905)
+    true_hz = 3187.421
+    windows = true_hz * (1.0 + rng.normal(0.0, 6e-4, size=60))
+
+    p = FrameParser()
+    for hz in windows:
+        p.feed(status_frame(hz))
+
+    mean_err = abs(p.measured_odr_hz - true_hz)
+    last_err = abs(p.last_odr_hz - true_hz)
+    assert mean_err < last_err
+    assert mean_err / true_hz < 2e-4
+
+
+def test_reset_clears_the_odr_average():
+    """새 측정은 이전 연결의 창을 물려받으면 안 된다."""
+    p = FrameParser()
+    p.feed(status_frame(3200.0))
+    p.reset()
+
+    assert p.measured_odr_hz is None
+    assert p.last_odr_hz is None
+    assert p.odr_windows == 0
+
+
+def test_corrupt_status_frame_never_enters_the_average():
+    """CRC가 깨진 창이 평균에 섞이면 조용히 결과만 틀어진다."""
+    p = FrameParser()
+    p.feed(status_frame(3187.4))
+
+    bad = bytearray(status_frame(9999.0))
+    bad[-1] ^= 0xFF
+    p.feed(bytes(bad))
+
+    assert p.odr_windows == 1
+    assert p.measured_odr_hz == pytest.approx(3187.4, abs=1e-3)
 
 
 def test_frame_split_across_chunks():

@@ -293,7 +293,12 @@ class MainWindow(QMainWindow):
                 self.buffer[self.count % RB_CAPACITY] = s[idx]
                 self.count += 1
         if self.link and self.link.measured_odr_hz:
-            self.odr_label.setText(f"실측 ODR : {self.link.measured_odr_hz:.2f} Hz")
+            # 창 수를 같이 보인다. 값이 멎어 있고 창만 늘면 정상이고, 창이
+            # 늘지 않으면 펌웨어가 유실 구간이라 보고를 건너뛰는 중이다.
+            self.odr_label.setText(
+                f"실측 ODR : {self.link.measured_odr_hz:.2f} Hz"
+                f" ({self.link.odr_windows}창 평균)"
+            )
 
     def _on_link_error(self, msg: str) -> None:
         self._status(msg)

@@ -85,18 +85,45 @@ class FrameParser:
     상태 프레임(0xFA 0xCD)은 실측 ODR로 흡수한다. 이 값은 헤더의 명목
     3200 Hz가 아니라 RP2040 크리스털로 잰 실제 샘플레이트이며, 물성치가
     fs²로 스케일되므로 분석에는 반드시 이 쪽을 써야 한다.
+
+    받은 상태 프레임은 하나씩 쓰지 않고 평균 낸다. 창 하나에는 약 0.06%의
+    경계 오차가 있는데(32샘플 버스트를 읽는 동안 새 샘플이 FIFO에 들어온다),
+    창마다 독립인 랜덤 오차라 N개를 평균하면 1/√N로 줄어든다. 30초 측정이면
+    0.01% 수준이다. 펌웨어가 창 길이를 1초 근방으로 고르게 맞춰 주므로 단순
+    산술평균으로 충분하다.
     """
 
-    measured_odr_hz: float | None = None
     stats: ParseStats = field(default_factory=ParseStats)
 
     _buf: bytearray = field(default_factory=bytearray, repr=False)
     _expected_seq: int | None = field(default=None, repr=False)
+    _odr_sum_hz: float = field(default=0.0, repr=False)
+    _odr_windows: int = field(default=0, repr=False)
+    _odr_last_hz: float | None = field(default=None, repr=False)
+
+    @property
+    def measured_odr_hz(self) -> float | None:
+        """분석에 쓸 실측 ODR — 지금까지 받은 창들의 평균. 없으면 None."""
+        if self._odr_windows == 0:
+            return None
+        return self._odr_sum_hz / self._odr_windows
+
+    @property
+    def last_odr_hz(self) -> float | None:
+        """가장 최근 창의 값. 표시·진단용이며 분석에는 쓰지 않는다."""
+        return self._odr_last_hz
+
+    @property
+    def odr_windows(self) -> int:
+        """평균에 들어간 창의 개수. 남은 오차를 가늠하는 데 쓴다."""
+        return self._odr_windows
 
     def reset(self) -> None:
         self._buf.clear()
         self._expected_seq = None
-        self.measured_odr_hz = None
+        self._odr_sum_hz = 0.0
+        self._odr_windows = 0
+        self._odr_last_hz = None
         self.stats = ParseStats()
 
     def feed(self, chunk: bytes) -> list[DataFrame]:
@@ -199,8 +226,10 @@ class FrameParser:
             del buf[:2]
             return True
 
-        odr_mhz = struct.unpack_from("<I", buf, 2)[0]
-        self.measured_odr_hz = odr_mhz / 1000.0
+        odr_hz = struct.unpack_from("<I", buf, 2)[0] / 1000.0
+        self._odr_last_hz = odr_hz
+        self._odr_sum_hz += odr_hz
+        self._odr_windows += 1
         self.stats.status_frames += 1
         del buf[:STATUS_FRAME_LEN]
         return True
