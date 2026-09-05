@@ -25,5 +25,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["residyn*"]
 
+[tool.setuptools.package-data]
+# 내장 펌웨어 이미지. 설치본에서도 "펌웨어 업데이트"가 파일 선택 없이 동작해야 한다.
+residyn = ["data/*.uf2"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

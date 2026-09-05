@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from residyn import rawio  # noqa: E402
 from residyn.criteria import Grade  # noqa: E402
 from residyn.protocol import DataFrame  # noqa: E402
+from residyn.ui.firmware_dialog import FirmwareDialog  # noqa: E402
 from residyn.ui.main_window import RB_CAPACITY, MainWindow  # noqa: E402
 from residyn.ui.meta_dialog import MetaDialog  # noqa: E402
 from residyn.report import ReportMeta  # noqa: E402
@@ -126,3 +127,49 @@ def test_meta_dialog_roundtrips(qapp):
 def test_port_refresh_never_leaves_combo_empty(win):
     win.refresh_ports()
     assert win.port_combo.count() >= 1
+
+
+def test_firmware_button_is_enabled_without_measuring(win):
+    """앱에서 이 버튼을 측정 중에만 켜 두었다가 겪은 문제 — 반복하지 않는다.
+
+    BOOTSEL 상태로 꽂힌 장치는 포트가 아예 없는데, 그때가 업데이트가 가장
+    필요한 순간이다.
+    """
+    assert win.btn_firmware.isEnabled()
+    win.btn_start.setEnabled(True)      # 측정 전 상태
+    assert win.btn_firmware.isEnabled()
+
+
+def test_firmware_dialog_offers_the_bundled_image(qapp):
+    d = FirmwareDialog(port=None)
+    try:
+        assert "내장 이미지" in d.source_label.text()
+        assert d.btn_run.isEnabled()
+    finally:
+        d.close()
+
+
+def test_firmware_dialog_rejects_a_bad_file_without_arming_the_button(qapp, tmp_path):
+    """엉뚱한 파일을 고르면 이전 이미지가 그대로 남아야 한다 — 조용히 굽지 않는다."""
+    from residyn import firmware
+
+    bad = tmp_path / "notfirmware.uf2"
+    bad.write_bytes(b"\x00" * 512)
+
+    d = FirmwareDialog(port=None)
+    try:
+        before = d.source_label.text()
+        from PySide6.QtWidgets import QFileDialog
+
+        orig = QFileDialog.getOpenFileName
+        QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(bad), ""))
+        try:
+            d._pick_file()
+        finally:
+            QFileDialog.getOpenFileName = orig
+
+        assert d.source_label.text() == before
+        assert "사용할 수 없는" in d.log.toPlainText()
+        assert d._data == firmware.bundled_uf2()[0]
+    finally:
+        d.close()
