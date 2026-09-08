@@ -104,10 +104,11 @@ def test_rejects_an_oversized_payload_field():
         firmware.inspect_uf2(bad)
 
 
-def test_family_id_is_only_checked_when_the_flag_says_it_is_present():
+def test_family_id_is_required_before_flashing():
     """flags에 FAMILY_ID가 없으면 그 필드는 family가 아니다."""
     ok = uf2_block(0, 1, flags=0, family=0xDEADBEEF)
-    assert firmware.inspect_uf2(ok).blocks == 1
+    with pytest.raises(FirmwareError):
+        firmware.inspect_uf2(ok)
 
 
 def test_read_uf2_reports_a_missing_file_clearly(tmp_path):
@@ -323,3 +324,9 @@ def test_flash_succeeds_even_if_the_port_does_not_come_back(tmp_path, monkeypatc
 
     assert firmware.update_firmware(uf2_image(2), port=None) is None
     assert (vol / "firmware.uf2").exists()
+
+
+
+@pytest.mark.parametrize('addr',[0x10000100,0x0ffffff0,0x10200000])
+def test_rejects_missing_boot_region_or_out_of_range_addresses(addr):
+    with pytest.raises(FirmwareError): firmware.inspect_uf2(uf2_block(0,1,addr=addr))

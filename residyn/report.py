@@ -151,8 +151,8 @@ def build(
     now = now or datetime.now()
     charts = charts or ChartData()
 
-    s48 = convert_48h(result.k_prime_mn_m3)
-    g = grade(s48)
+    s48 = convert_48h(result.k_prime_mn_m3, cfg.correction_factor)
+    g = grade(s48, cfg.excellent_max, cfg.pass_max)
 
     c = canvas.Canvas(str(path), pagesize=A4)
     y = PAGE_H - MARGIN
@@ -208,8 +208,8 @@ def build(
 
     c.setFillColor(MUTED)
     c.setFont(_FONT, 9)
-    c.drawString(MARGIN + 12, y - 18, "48시간 환산 동탄성계수 (판정값)")
-    conv = f"= 측정값 {result.k_prime_mn_m3:.2f} × {CORRECTION_48H}"
+    c.drawString(MARGIN + 12, y - 18, "환산 동탄성계수 (사용자 기준)")
+    conv = f"= 측정값 {result.k_prime_mn_m3:.2f} × {cfg.correction_factor}"
     c.setFont(_FONT, 8.5)
     c.drawRightString(PAGE_W - MARGIN - 12, y - 18, conv)
 
@@ -225,7 +225,7 @@ def build(
     y = _rows(
         c, y,
         [
-            ("측정 동탄성계수 (2시간 존치)", f"{result.k_prime_mn_m3:.3f} MN/m³"),
+            ("측정 동탄성계수", f"{result.k_prime_mn_m3:.3f} MN/m³"),
             ("공진주파수 f", f"{result.f0_hz:.2f} Hz"),
             ("손실계수 (Loss Factor)", f"{result.eta:.3f}"),
         ],
@@ -257,10 +257,10 @@ def build(
     c.setFont(_FONT, 8)
     notes = [
         "동탄성계수 s′ = (2π f)² × m ÷ S  (m = 하중판 질량, S = 완충재 면적)",
-        f"현장 측정은 하중판 2시간 존치 조건이며, 보정계수 {CORRECTION_48H}를 곱해 "
-        "48시간 값으로 환산한다.",
-        f"판정 기준 : {EXCELLENT_MAX_MN_M3:.0f} MN/m³ 이하 우수 / "
-        f"{PASS_MAX_MN_M3:.0f} MN/m³ 이하 합격 / 초과 시 기준 초과",
+        f"사용자 지정 환산계수 {cfg.correction_factor}; 존치시간과 환산 근거는 별도 확인이 필요합니다.",
+        "손실계수: 단일모드 자유감쇠 적합에 의한 등가 점성 손실(2ζ).",
+        f"판정 기준 : {cfg.excellent_max:g} MN/m³ 이하 우수 / "
+        f"{cfg.pass_max:g} MN/m³ 이하 합격 / 초과 시 기준 초과",
         f"본 성적서는 시편 1개의 결과이며, 동일 로트 시편 {meta.specimen_total}개의 "
         "평균으로 최종 판정한다.",
     ]
@@ -404,3 +404,4 @@ def _chart(
     c.drawString(x0, base, f"{x_min:.1f}")
     c.drawCentredString(x0 + w / 2, base, x_unit)
     c.drawRightString(x0 + w, base, f"{x_max:.1f}")
+

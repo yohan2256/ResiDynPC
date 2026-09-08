@@ -1,0 +1,11 @@
+{
+  "sha256": "a154b9216f8e2371cddcffaa3cb829350c9203ceab8454838a7301a07fb58c6c",
+  "source_main_sha256": "c9529876067e28657f01b8e587897d6c2342af83be5f0f2d024551ec0d94a562",
+  "source_cmake_sha256": "7eca9dd440174dcbf8f166bec3e8bc9a47819958d602d340cc23059a7f9a748d",
+  "pico_sdk": "2.2.0",
+  "tinyusb": "86ad6e56c1700e85f1c5678607a762cfe3aa2f47",
+  "compiler": "Arm GNU Toolchain 13.2.Rel1",
+  "board": "pico (RP2040, 2 MB flash)",
+  "build_type": "Release",
+  "hardware_verified": false
+}

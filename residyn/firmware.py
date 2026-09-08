@@ -98,7 +98,9 @@ def inspect_uf2(data: bytes) -> Uf2Info:
             raise FirmwareError(f"UF2 형식이 아닙니다 (블록 {i}: 매직 불일치).")
         if end != UF2_MAGIC_END:
             raise FirmwareError(f"UF2 형식이 아닙니다 (블록 {i}: 끝 매직 불일치).")
-        if payload_size > UF2_BLOCK_SIZE - 32 - 4:
+        if flags != UF2_FLAG_FAMILY_ID:
+            raise FirmwareError("RP2040 family ID가 있는 전체 플래시 UF2만 지원합니다")
+        if payload_size != 256 or addr % 256 or not (0x10000000 <= addr < 0x10200000):
             raise FirmwareError(f"UF2 블록 {i}의 payload 크기가 범위를 벗어납니다.")
         if flags & UF2_FLAG_FAMILY_ID and family != RP2040_FAMILY_ID:
             raise FirmwareError(
@@ -112,6 +114,8 @@ def inspect_uf2(data: bytes) -> Uf2Info:
         if seq != i:
             raise FirmwareError(f"UF2 블록 순서가 어긋납니다 ({i}번 자리에 {seq}번).")
 
+        if addr != 0x10000000 + i * 256:
+            raise FirmwareError("플래시 주소 누락/중복: 연속된 전체 이미지만 지원합니다")
         if start_address is None:
             start_address = addr
         payload_total += payload_size
@@ -368,3 +372,4 @@ __all__ = [
     "wait_for_device_port",
     "write_uf2_to_volume",
 ]
+

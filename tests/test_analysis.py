@@ -46,8 +46,8 @@ def test_k_prime_formula_and_units():
 
 def test_search_range_confines_f0():
     """상한 밖 공진은 f0로 뽑히면 안 된다."""
-    r = analyze(damped_sine(200.0, 6400), FS, AnalysisConfig(search_high_hz=150.0))
-    assert 15.0 <= r.f0_hz <= 150.0
+    with pytest.raises(ValueError):
+        analyze(damped_sine(200.0, 6400), FS, AnalysisConfig(search_high_hz=150.0))
 
 
 def test_widening_range_reaches_higher_resonance():
@@ -56,15 +56,19 @@ def test_widening_range_reaches_higher_resonance():
     assert r.f0_hz == pytest.approx(200.0, abs=5.0)
 
 
-def test_inverted_range_still_returns_finite():
+def test_inverted_range_is_rejected():
     cfg = AnalysisConfig(search_low_hz=200.0, search_high_hz=50.0)
-    r = analyze(damped_sine(100.0, 6400), FS, cfg)
-    assert np.isfinite(r.f0_hz) and np.isfinite(r.eta)
+    with pytest.raises(ValueError):
+        analyze(damped_sine(100.0, 6400), FS, cfg)
 
 
 @pytest.mark.parametrize("n", [300, 400, 480, 500, 600, 800])
 @pytest.mark.parametrize("f", [2.0, 10.0, 20.0, 50.0])
-def test_short_or_sparse_signals_do_not_throw(n, f):
+def test_short_or_sparse_signals_require_resolvable_decay(n, f):
+    if f < 15 or n / FS < 3 / f + .03:
+        with pytest.raises(ValueError):
+            analyze(damped_sine(f, n), FS, AnalysisConfig())
+        return
     r = analyze(damped_sine(f, n), FS, AnalysisConfig())
     assert np.isfinite(r.f0_hz) and np.isfinite(r.eta)
 
@@ -72,8 +76,8 @@ def test_short_or_sparse_signals_do_not_throw(n, f):
 def test_impulse_only_signal():
     x = np.zeros(600)
     x[10] = 1000.0
-    r = analyze(x, FS, AnalysisConfig())
-    assert np.isfinite(r.f0_hz)
+    with pytest.raises(ValueError):
+        analyze(x, FS, AnalysisConfig())
 
 
 def test_too_few_samples_rejected():
@@ -127,3 +131,34 @@ def test_measured_odr_changes_result():
     measured = analyze(x, 3168.0, AnalysisConfig())      # -1%
     ratio = measured.k_prime_mn_m3 / nominal.k_prime_mn_m3
     assert ratio == pytest.approx((3168.0 / 3200.0) ** 2, rel=0.02)
+
+
+
+@pytest.mark.parametrize("eta", [.01, .05, .1, .2, .4])
+@pytest.mark.parametrize("cycles", [5, 10, 20])
+def test_known_decay_accuracy_independent_of_window(eta, cycles):
+    t = np.arange(9600) / FS
+    age = np.maximum(t-.2, 0)
+    x = np.where(t >= .2, 1000*np.exp(-np.pi*50*eta*age)*np.sin(2*np.pi*50*age), 0)
+    r = analyze(x, FS, AnalysisConfig(num_cycles=cycles))
+    assert r.f0_hz == pytest.approx(50*np.sqrt(1+(eta/2)**2), abs=.002)
+    assert r.eta == pytest.approx(eta/np.sqrt(1+(eta/2)**2), abs=.0001)
+
+@pytest.mark.parametrize("kind", ["zero", "constant", "tone", "nan", "clip", "double"])
+def test_invalid_measurement_cannot_produce_a_grade(kind):
+    t = np.arange(9600)/FS
+    x = 1000*np.exp(-5*t)*np.sin(2*np.pi*50*t)
+    if kind == "zero": x[:] = 0
+    if kind == "constant": x[:] = 255
+    if kind == "tone": x = 1000*np.sin(2*np.pi*50*t)
+    if kind == "nan": x[200] = np.nan
+    if kind == "clip": x[200] = 4095
+    if kind == "double": x[640:] += 800*np.exp(-5*t[:-640])*np.sin(2*np.pi*50*t[:-640])
+    with pytest.raises(ValueError): analyze(x, FS, AnalysisConfig())
+
+def test_decay_fit_tolerates_sensor_quantization_and_small_noise():
+    t=np.arange(9600)/FS
+    rng=np.random.default_rng(42)
+    x=np.rint(255+1000*np.exp(-np.pi*50*.1*t)*np.sin(2*np.pi*50*t)+rng.normal(0,1,t.size))
+    r=analyze(x,FS,AnalysisConfig())
+    assert r.eta == pytest.approx(.1/np.sqrt(1+.05**2), abs=.002)

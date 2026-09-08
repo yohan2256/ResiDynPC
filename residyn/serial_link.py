@@ -106,12 +106,17 @@ class SerialLink:
         self.parser.reset()
         self._stop.clear()
         self._ser = serial.Serial(
-            self.port, self.baudrate, timeout=_READ_TIMEOUT_S
+            self.port, self.baudrate, timeout=_READ_TIMEOUT_S, write_timeout=0.5
         )
         # 위 주석 참고 — 이걸 빼면 데이터가 한 바이트도 오지 않는다.
-        self._ser.dtr = True
-        self._ser.rts = True
-        self._ser.reset_input_buffer()
+        try:
+            self._ser.dtr = True
+            self._ser.rts = True
+            self._ser.reset_input_buffer()
+        except Exception:
+            self._ser.close()
+            self._ser = None
+            raise
 
         self._thread = threading.Thread(target=self._run, name="residyn-serial", daemon=True)
         self._thread.start()
@@ -174,3 +179,4 @@ class SerialLink:
                 continue
             if frames:
                 self._on_frames(frames)
+

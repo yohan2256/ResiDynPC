@@ -185,3 +185,17 @@ def test_reboot_magic_is_eight_bytes():
 def test_crc_matches_firmware_vector():
     # CRC16-CCITT(0xFFFF init) 표준 벡터
     assert crc16_ccitt(b"123456789") == 0x29B1
+
+
+
+def test_late_or_duplicate_frames_cannot_append_to_timeline():
+    import struct
+    def packet(seq):
+        body=struct.pack('<BBHBBHhhh',250,206,seq,1,0,0,0,0,seq)
+        return body+struct.pack('<H',crc16_ccitt(body))
+    p=FrameParser()
+    frames=p.feed(packet(0)+packet(2)+packet(1)+packet(2)+packet(3))
+    assert [f.seq_start for f in frames] == [0,2,3]
+    assert p.quality_error is not None
+    p.reset()
+    assert p.quality_error is None
