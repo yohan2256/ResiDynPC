@@ -4,8 +4,8 @@ ResiDynMobile 의 DynAnalysis.kt 를 그대로 옮긴 것이다. 같은 측정�
 PC가 다른 값을 내면 어느 쪽도 신뢰할 수 없으므로, 단계 순서와 상수를 임의로
 바꾸지 않는다.
 
-절차: 가속도 환산 → HPF → 적분 → HPF → 충격점 탐지 → zero-crossing 구간 →
-Hann + 10× zero-pad FFT → 탐색 범위 내 최대 스펙트럼 → 반전력 대역폭.
+절차: 가속도 전처리와 FFT로 초기 주파수 추정 → 창을 씌우지 않은 원시 자유감쇠
+신호에 단일모드 지수감쇠 모델 적합. Hann 대역폭을 손실계수로 사용하지 않는다.
 """
 
 from __future__ import annotations
@@ -39,14 +39,15 @@ class AnalysisConfig:
     search_high_hz: float = 150.0
     method: str = "FFT"          # "FFT" | "PEAK"
     start_cycle: int = 2
+    correction_factor: float = 1.25
+    excellent_max: float = 15.0
+    pass_max: float = 20.0
     num_cycles: int = 10
 
 
 @dataclass
 class AnalysisResult:
     f0_hz: float
-    f1_hz: float
-    f2_hz: float
     eta: float                   # 손실계수
     k_prime_mn_m3: float         # 동탄성계수 [MN/m³] (2시간 존치 측정값)
     freq: np.ndarray
@@ -114,6 +115,18 @@ def analyze(raw: np.ndarray, fs: float, cfg: AnalysisConfig) -> AnalysisResult:
     if not np.isfinite(fs) or fs <= 0:
         raise ValueError(f"샘플레이트가 올바르지 않다: {fs}")
 
+    if raw.ndim != 1 or raw.size > 96000 or not np.all(np.isfinite(raw)):
+        raise ValueError("유효한 1차원 원시 데이터(최대 96000샘플)가 필요합니다")
+    if not (100 <= fs <= 6400):
+        raise ValueError("지원하지 않는 샘플레이트")
+    if not (np.isfinite(cfg.mass_kg) and cfg.mass_kg > 0 and np.isfinite(cfg.area_m2) and cfg.area_m2 > 0):
+        raise ValueError("질량과 면적은 양의 유한값이어야 합니다")
+    if not (5 < cfg.search_low_hz < cfg.search_high_hz < fs / 2):
+        raise ValueError("탐색 범위는 5 Hz 초과, Nyquist 미만의 오름차순이어야 합니다")
+    if cfg.method.upper() not in ("FFT", "PEAK") or not (0 <= cfg.start_cycle <= 50 and 1 <= cfg.num_cycles <= 100):
+        raise ValueError("분석 방식 또는 주기 설정이 올바르지 않습니다")
+    if np.ptp(raw) < 8 or np.max(np.abs(raw)) >= 4090:
+        raise ValueError("무신호/진폭 부족 또는 센서 포화: 다시 측정하세요")
     dt = 1.0 / fs
 
     # 1. 가속도 환산 → HPF
@@ -172,41 +185,17 @@ def analyze(raw: np.ndarray, fs: float, cfg: AnalysisConfig) -> AnalysisResult:
             if avg > 0:
                 f0 = 1.0 / avg
 
-    # 8. 반전력 대역폭 → 손실계수
-    hp = max_v / np.sqrt(2.0)
-    il = idx_max
-    while il > i0 and mag[il] > hp:
-        il -= 1
-    if il == idx_max:
-        f1 = f0
-    elif mag[il] > hp:
-        # 하한까지 내려가도 반전력점을 못 찾음 — 외삽하면 엉뚱한 값이 되므로 클램프
-        f1 = float(freq[il])
-    else:
-        f1 = _interp(freq, mag, il, il + 1, hp)
-
-    ir = idx_max
-    while ir < i1 and mag[ir] > hp:
-        ir += 1
-    if ir == idx_max:
-        f2 = f0
-    elif mag[ir] > hp:
-        f2 = float(freq[ir])
-    else:
-        f2 = _interp(freq, mag, ir - 1, ir, hp)
-
-    # 대역폭은 FFT 피크 기준으로 쟀으므로 eta도 FFT 피크로 정규화한다
-    # (PEAK 모드에서 f0가 시계열 기반으로 바뀌어도 일관성 유지).
-    f_fft = float(freq[idx_max])
-    eta = (f2 - f1) / f_fft if f_fft > 0 else 0.0
+    # Window bandwidth is NOT a damping estimator. Fit the unwindowed raw
+    # free decay independently of the display/FFT cycle selection.
+    f_d, alpha, fit_error = fit_decay(raw, fs, float(freq[idx_max]), cfg)
+    f0 = float(np.hypot(f_d, alpha / (2 * np.pi)))
+    eta = float(2 * alpha / (2 * np.pi * f0))  # equivalent viscous loss, 2*zeta
 
     omega = 2.0 * np.pi * f0
     k_prime = omega * omega * cfg.mass_kg / cfg.area_m2
 
     return AnalysisResult(
         f0_hz=f0,
-        f1_hz=f1,
-        f2_hz=f2,
         eta=float(eta),
         k_prime_mn_m3=float(k_prime / 1e6),
         freq=freq,
@@ -214,3 +203,78 @@ def analyze(raw: np.ndarray, fs: float, cfg: AnalysisConfig) -> AnalysisResult:
         vel_time=seg_v,
         time_axis=seg_t,
     )
+
+
+
+def fit_decay(raw: np.ndarray, fs: float, seed: float, cfg: AnalysisConfig) -> tuple[float, float, float]:
+    """Fit c + exp(-alpha*t)*(a*cos(2*pi*f*t)+b*sin(2*pi*f*t)).
+
+    Equivalent viscous single-mode model, not a force-normalized FRF or an
+    ISO compliance claim. Reject unresolved/multimode/non-decaying records.
+    Same variable-projection coordinate search as DecayFit.kt.
+    """
+    # Seed from unwindowed raw acceleration, independent of display settings.
+    center = float(np.median(raw))
+    start = int(np.argmax(np.abs(raw - center)))
+    pilot = raw[start:start + int(fs)] - center
+    pad = _next_pow2(pilot.size * 4)
+    spectrum = np.abs(np.fft.rfft(pilot, pad))
+    lo = int(np.ceil(cfg.search_low_hz * pad/fs))
+    hi = int(np.floor(cfg.search_high_hz * pad/fs))
+    peak = lo + int(np.argmax(spectrum[lo:hi+1]))
+    seed = peak * fs/pad
+    period = max(1, int(fs / seed))
+    levels = np.array([np.std(raw[i:i+period]) for i in range(0, raw.size-period+1, period)])
+    strong = np.flatnonzero(levels > .2 * levels.max())
+    if strong.size:
+        first = int(strong[0])
+        for i in range(first+3, levels.size):
+            if levels[i] > .2*levels.max() and levels[i] > 1.5*levels[i-1]:
+                raise ValueError("다중 충격 또는 비단조 감쇠: 한 번 타격하여 다시 측정하세요")
+    count = min(raw.size - start, int(20 * fs / seed))
+    if count < 3 * fs / seed:
+        raise ValueError("자유감쇠 구간이 3주기보다 짧습니다")
+    stride = max(1, int(fs / seed / 40))
+    y = raw[start:start + count:stride]
+    t = np.arange(y.size) * stride / fs
+    energy = float(np.sum((y - y.mean()) ** 2))
+    if energy < 1:
+        raise ValueError("진동 에너지가 부족합니다")
+
+    def score(f: float, alpha: float) -> float:
+        if not (cfg.search_low_hz < f < cfg.search_high_hz) or not (0 <= alpha <= np.pi * seed):
+            return float("inf")
+        e = np.exp(-alpha * t)
+        basis = np.column_stack((e * np.cos(2*np.pi*f*t), e * np.sin(2*np.pi*f*t), np.ones(y.size)))
+        coef = np.linalg.lstsq(basis, y, rcond=None)[0]
+        return float(np.sum((y - basis @ coef) ** 2) / energy)
+
+    best = (float("inf"), seed, 0.0)
+    for damping in (0.0, 0.02, 0.1, 0.3):
+        f, alpha = seed, damping * np.pi * seed
+        value = score(f, alpha)
+        df, da = .04 * seed, .08 * np.pi * seed
+        for _ in range(70):
+            candidate = (value, f, alpha)
+            for ff, aa in ((f-df,alpha),(f+df,alpha),(f,alpha-da),(f,alpha+da)):
+                v = score(ff, aa)
+                if v < candidate[0]: candidate = (v, ff, aa)
+            if candidate[0] < value:
+                value, f, alpha = candidate
+            else:
+                df *= .5
+                da *= .5
+            if df < seed * 1e-7 and da < seed * 1e-6: break
+        if value < best[0]: best = (value, f, alpha)
+    error, f, alpha = best
+    if not np.isfinite(error) or error > .05:
+        raise ValueError("단일 자유감쇠 모델 부적합: 다중 충격/모드/잡음 확인")
+    # Require resolvable decay; a stationary tone must not certify damping.
+    if alpha * (t[-1] - t[0]) < .1:
+        raise ValueError("감쇠량이 부족하여 손실계수를 확정할 수 없습니다")
+    if min(f-cfg.search_low_hz, cfg.search_high_hz-f) < max(.5, .01*f):
+        raise ValueError("공진이 탐색 경계에 있습니다. 범위를 넓히세요")
+    natural = np.hypot(f, alpha/(2*np.pi))
+    if natural >= cfg.search_high_hz:
+        raise ValueError("고유주파수가 탐색 범위를 벗어납니다")
+    return float(f), float(alpha), float(error)

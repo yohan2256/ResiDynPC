@@ -59,6 +59,8 @@ class DataFrame:
     dropped: int
     samples: list[tuple[int, int, int]]   # (x, y, z) 원시 LSB
 
+    discontinuity: bool = False
+
     @property
     def overrun(self) -> bool:
         return bool(self.flags & FLAG_OVERRUN)
@@ -95,6 +97,8 @@ class FrameParser:
 
     stats: ParseStats = field(default_factory=ParseStats)
 
+    quality_error: str | None = None
+
     _buf: bytearray = field(default_factory=bytearray, repr=False)
     _expected_seq: int | None = field(default=None, repr=False)
     _odr_sum_hz: float = field(default=0.0, repr=False)
@@ -119,6 +123,7 @@ class FrameParser:
         return self._odr_windows
 
     def reset(self) -> None:
+        self.quality_error = None
         self._buf.clear()
         self._expected_seq = None
         self._odr_sum_hz = 0.0
@@ -130,6 +135,7 @@ class FrameParser:
         """수신 바이트를 넣고, 완성된 데이터 프레임들을 순서대로 돌려준다."""
         self._buf.extend(chunk)
         if len(self._buf) > _MAX_BUFFER:
+            self.quality_error = "수신 버퍼 초과: 다시 측정하세요"
             del self._buf[: len(self._buf) - _MAX_BUFFER]
 
         out: list[DataFrame] = []
@@ -175,6 +181,7 @@ class FrameParser:
         seq, count, flags, dropped = struct.unpack_from("<HBBH", buf, 2)
         if count == 0 or count > MAX_SAMPLES:
             # 헤더가 깨졌다. sync 2바이트만 버리고 다시 찾는다.
+            self.quality_error = "손상된 프레임: 다시 측정하세요"
             self.stats.crc_errors += 1
             self.stats.resync_bytes += 2
             del buf[:2]
@@ -187,6 +194,7 @@ class FrameParser:
         body = bytes(buf[: total - 2])
         got = struct.unpack_from("<H", buf, total - 2)[0]
         if crc16_ccitt(body) != got:
+            self.quality_error = "손상된 프레임: 다시 측정하세요"
             self.stats.crc_errors += 1
             self.stats.resync_bytes += 2
             del buf[:2]
@@ -197,18 +205,22 @@ class FrameParser:
             for i in range(count)
         ]
 
+        gap = False
         if self._expected_seq is not None and seq != self._expected_seq:
-            # 랩어라운드를 고려한 전방 갭만 갭으로 센다. 재전송으로 뒤를
-            # 채우는 프레임은 기대값을 되돌리지 않는다.
-            if (seq - self._expected_seq) & 0xFFFF < 0x8000:
-                self.stats.gaps += 1
-                self._expected_seq = (seq + count) & 0xFFFF
-        else:
-            self._expected_seq = (seq + count) & 0xFFFF
+            if ((seq - self._expected_seq) & 0xFFFF) >= 0x8000:
+                # Duplicate/late retransmission must never append old samples.
+                del buf[:total]
+                return True
+            gap = True
+            self.stats.gaps += 1
+            self.quality_error = "샘플 유실: 다시 측정하세요"
+        self._expected_seq = (seq + count) & 0xFFFF
+        if flags or dropped:
+            self.quality_error = "센서/수집 오류: 다시 측정하세요"
 
         self.stats.frames += 1
         self.stats.dropped_samples += dropped
-        out.append(DataFrame(seq, flags, dropped, samples))
+        out.append(DataFrame(seq, flags, dropped, samples, gap))
         del buf[:total]
         return True
 
@@ -221,15 +233,21 @@ class FrameParser:
         got = struct.unpack_from("<H", buf, STATUS_FRAME_LEN - 2)[0]
         if crc16_ccitt(body) != got:
             # 상태 프레임은 재전송 대상이 아니다. 버리고 다음(최대 1초 뒤)을 기다린다.
+            self.quality_error = "손상된 프레임: 다시 측정하세요"
             self.stats.crc_errors += 1
             self.stats.resync_bytes += 2
             del buf[:2]
             return True
 
         odr_hz = struct.unpack_from("<I", buf, 2)[0] / 1000.0
+        if not 2500 <= odr_hz <= 4000:
+            self.quality_error = "실측 ODR 범위 오류: 다시 측정하세요"
+            del buf[:STATUS_FRAME_LEN]
+            return True
         self._odr_last_hz = odr_hz
         self._odr_sum_hz += odr_hz
         self._odr_windows += 1
         self.stats.status_frames += 1
         del buf[:STATUS_FRAME_LEN]
         return True
+

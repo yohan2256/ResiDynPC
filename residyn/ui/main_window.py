@@ -62,6 +62,12 @@ class MainWindow(QMainWindow):
         self.count = 0                        # 링 버퍼에 쌓인 총량
         self.result: AnalysisResult | None = None
         self.meta = report.ReportMeta()
+        self.quality_error: str | None = None
+        self.capture_axis = "AZ"
+        self.result_config: AnalysisConfig | None = None
+        self.result_axis = "AZ"
+        self.result_thickness = 0.03
+        self.result_time: datetime | None = None
         self.loaded_fs: float | None = None    # 파일에서 불러온 경우의 fs
 
         self._build_ui()
@@ -73,6 +79,11 @@ class MainWindow(QMainWindow):
         self._chart_timer.timeout.connect(self._refresh_wave)
         self._chart_timer.setInterval(CHART_INTERVAL_MS)
 
+        self.axis_combo.currentTextChanged.connect(self._axis_changed)
+        for spin in (self.mass_spin, self.area_spin, self.thick_spin, self.low_spin,
+                     self.high_spin, self.factor_spin, self.excellent_spin, self.limit_spin, self.start_cycle_spin, self.cycles_spin):
+            spin.valueChanged.connect(self._invalidate_result)
+        self.method_combo.currentTextChanged.connect(self._invalidate_result)
         self.refresh_ports()
 
     # ---- UI 구성 ------------------------------------------------------------
@@ -122,7 +133,7 @@ class MainWindow(QMainWindow):
         self.verdict_label = QLabel("")
         self.verdict_label.setStyleSheet("font-size: 15px; font-weight: 700;")
         self.detail_label = QLabel("f₀ : —    손실계수 : —")
-        rl.addWidget(QLabel("48시간 환산 (판정값)"))
+        rl.addWidget(QLabel("환산값 (사용자 판정 기준)"))
         rl.addWidget(self.k_label)
         rl.addWidget(self.verdict_label)
         rl.addWidget(self.detail_label)
@@ -169,6 +180,9 @@ class MainWindow(QMainWindow):
         self.thick_spin = self._dspin(0.03, 0.0001, 1.0, 4)
         self.low_spin = self._dspin(15.0, 0.1, 10000.0, 1)
         self.high_spin = self._dspin(150.0, 0.1, 10000.0, 1)
+        self.factor_spin = self._dspin(1.25, .01, 10.0, 3)
+        self.excellent_spin = self._dspin(15.0, .01, 1000.0, 2)
+        self.limit_spin = self._dspin(20.0, .01, 1000.0, 2)
         self.axis_combo = QComboBox()
         self.axis_combo.addItems(AXES.keys())
         self.method_combo = QComboBox()
@@ -180,6 +194,9 @@ class MainWindow(QMainWindow):
         form.addRow("완충재 두께 [m]", self.thick_spin)
         form.addRow("탐색 하한 [Hz]", self.low_spin)
         form.addRow("탐색 상한 [Hz]", self.high_spin)
+        form.addRow("환산계수 (1 = 보정 없음)", self.factor_spin)
+        form.addRow("우수 상한 [MN/m³]", self.excellent_spin)
+        form.addRow("합격 상한 [MN/m³]", self.limit_spin)
         form.addRow("센서 축", self.axis_combo)
         form.addRow("해석 방식", self.method_combo)
         form.addRow("시작 주기", self.start_cycle_spin)
@@ -231,15 +248,18 @@ class MainWindow(QMainWindow):
             method=self.method_combo.currentText(),
             start_cycle=self.start_cycle_spin.value(),
             num_cycles=self.cycles_spin.value(),
+            correction_factor=self.factor_spin.value(),
+            excellent_max=self.excellent_spin.value(),
+            pass_max=self.limit_spin.value(),
         )
 
     @property
     def fs(self) -> float:
         """분석에 쓸 샘플레이트. 실측 ODR을 최우선으로 한다."""
-        if self.link is not None and self.link.measured_odr_hz:
-            return self.link.measured_odr_hz
         if self.loaded_fs:
             return self.loaded_fs
+        if self.link is not None and self.link.measured_odr_hz:
+            return self.link.measured_odr_hz
         return 3200.0
 
     def samples(self) -> np.ndarray:
@@ -268,6 +288,9 @@ class MainWindow(QMainWindow):
             self._status("연결할 포트가 없습니다")
             return
 
+        self._invalidate_result()
+        self.quality_error = None
+        self.capture_axis = self.axis_combo.currentText()
         self.count = 0
         self.loaded_fs = None
         self.link = SerialLink(
@@ -282,6 +305,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "연결 실패", f"포트를 열지 못했습니다:\n{e}")
             return
 
+        self.axis_combo.setEnabled(False)
+        self.btn_load_raw.setEnabled(False)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self._chart_timer.start()
@@ -305,14 +330,26 @@ class MainWindow(QMainWindow):
     def stop_measure(self) -> None:
         self._chart_timer.stop()
         if self.link is not None:
+            if self.link.measured_odr_hz is None and self.count:
+                self.quality_error = "실측 ODR 미수신: 1초 이상 새로 측정하세요"
+            self.loaded_fs = self.link.measured_odr_hz or 3200.0
+            self.quality_error = self.quality_error or self.link.parser.quality_error
             self.link.close()
+            self.link = None
+        self.axis_combo.setEnabled(True)
+        self.btn_load_raw.setEnabled(True)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self._status(f"정지 — {min(self.count, RB_CAPACITY):,} 샘플")
 
     def _on_frames(self, frames: list[DataFrame]) -> None:
-        idx = AXES[self.axis_combo.currentText()]
+        idx = AXES[self.capture_axis]
+        if self.link:
+            self.quality_error = self.quality_error or self.link.parser.quality_error
         for f in frames:
+            if f.flags or f.dropped or f.discontinuity:
+                self.quality_error = "센서 오류/샘플 유실: 다시 측정하세요"
+                self._invalidate_result()
             for s in f.samples:
                 self.buffer[self.count % RB_CAPACITY] = s[idx]
                 self.count += 1
@@ -325,37 +362,60 @@ class MainWindow(QMainWindow):
             )
 
     def _on_link_error(self, msg: str) -> None:
-        self._status(msg)
         self.stop_measure()
+        self.quality_error = msg
+        self._invalidate_result()
+        self._status(msg)
 
     def _refresh_wave(self) -> None:
+        if self.result is not None:
+            return
         x = self.samples()
         if x.size == 0:
             return
         step = max(1, x.size // CHART_MAX_POINTS)
-        y = x[::step]
-        t = np.arange(y.size) * step / self.fs
+        indices = []
+        for i in range(0, x.size, step):
+            block = x[i:i+step]
+            indices.extend(sorted({i + int(np.argmin(block)), i + int(np.argmax(block))}))
+        y = x[indices]
+        t = np.asarray(indices) / self.fs
         self.wave_curve.setData(t, y)
 
     # ---- 분석 · 내보내기 ------------------------------------------------------
 
     def run_analysis(self) -> None:
+        # Stop and drain queued frame signals before taking an immutable snapshot.
+        self.stop_measure()
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        self._invalidate_result()
+        if self.quality_error:
+            self._status(self.quality_error)
+            return
         x = self.samples()
         if x.size < MIN_SAMPLES:
             self._status(f"샘플이 부족합니다 ({x.size} < {MIN_SAMPLES})")
             return
         cfg = self.config()
+        if cfg.excellent_max > cfg.pass_max:
+            self._status("우수 상한은 합격 상한 이하여야 합니다")
+            return
         try:
             self.result = analyze(x, self.fs, cfg)
         except Exception as e:
             QMessageBox.warning(self, "분석 실패", str(e))
             return
 
+        self.result_config = cfg
+        self.result_axis = self.capture_axis
+        self.result_thickness = self.thick_spin.value()
+        self.result_time = datetime.now()
         r = self.result
-        s48 = convert_48h(r.k_prime_mn_m3)
-        g = grade(s48)
+        s48 = convert_48h(r.k_prime_mn_m3, cfg.correction_factor)
+        g = grade(s48, cfg.excellent_max, cfg.pass_max)
         self.k_label.setText(f"{s48:.2f} MN/m³")
-        self.verdict_label.setText(f"{g.label}   (측정 {r.k_prime_mn_m3:.3f} × 1.25)")
+        self.verdict_label.setText(f"{g.label}   (측정 {r.k_prime_mn_m3:.3f} × {cfg.correction_factor:g})")
         self.verdict_label.setStyleSheet(
             "font-size: 15px; font-weight: 700; color: "
             + ("#B3261E" if g is Grade.FAIL else "#00D5E6")
@@ -387,9 +447,10 @@ class MainWindow(QMainWindow):
 
         try:
             report.build(
-                path, self.meta, self.config(), self.result,
-                thickness_m=self.thick_spin.value(),
-                axis=self.axis_combo.currentText(),
+                path, self.meta, self.result_config, self.result,
+                thickness_m=self.result_thickness,
+                axis=self.result_axis,
+                now=self.result_time,
                 charts=report.ChartData(
                     self.result.time_axis, self.result.vel_time,
                     self.result.freq, self.result.mag,
@@ -408,6 +469,10 @@ class MainWindow(QMainWindow):
         self._status(f"성적서 저장됨 — {Path(path).name}")
 
     def save_raw(self) -> None:
+        self.stop_measure()
+        if self.quality_error:
+            self._status(self.quality_error)
+            return
         x = self.samples()
         if x.size == 0:
             self._status("저장할 데이터가 없습니다")
@@ -419,13 +484,14 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            rawio.write(path, x, self.fs, axis=self.axis_combo.currentText())
+            rawio.write(path, x, self.fs, axis=self.capture_axis)
         except Exception as e:
             QMessageBox.critical(self, "저장 실패", str(e))
             return
         self._status(f"원시 데이터 {x.size:,} 샘플 저장됨")
 
     def load_raw(self) -> None:
+        self.stop_measure()
         path, _ = QFileDialog.getOpenFileName(
             self, "원시 데이터 불러오기", "",
             f"ResiDyn raw (*{rawio.EXT} *.wav);;모든 파일 (*)",
@@ -438,17 +504,42 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "불러오기 실패", str(e))
             return
 
+        self._invalidate_result()
+        self.quality_error = None
         n = min(rec.samples.size, RB_CAPACITY)
         self.buffer[:n] = rec.samples[-n:]
         self.count = n
         self.loaded_fs = rec.fs_hz
         if rec.axis in AXES:
+            self.axis_combo.blockSignals(True)
             self.axis_combo.setCurrentText(rec.axis)
+            self.axis_combo.blockSignals(False)
+        self.capture_axis = rec.axis if rec.axis in AXES else self.axis_combo.currentText()
 
         note = "주석의 실측값" if rec.fs_from_comment else "헤더값(주석 없음)"
         self.odr_label.setText(f"실측 ODR : {rec.fs_hz:.2f} Hz ({note})")
         self._refresh_wave()
         self._status(f"{n:,} 샘플 불러옴 — {Path(path).name}")
+
+    def _invalidate_result(self, *_args) -> None:
+        self.result = None
+        self.result_config = None
+        self.btn_report.setEnabled(False)
+        self.k_label.setText("— MN/m³")
+        self.verdict_label.setText("")
+        self.detail_label.setText("재분석 필요")
+        self.spec_curve.setData([], [])
+        self.f0_line.setVisible(False)
+
+    def _axis_changed(self, axis: str) -> None:
+        self.stop_measure()
+        self.count = 0
+        self.capture_axis = axis
+        self.quality_error = None
+        self.loaded_fs = None
+        self._invalidate_result()
+        self.wave_curve.setData([], [])
+        self._status("측정 축 변경: 새로 측정하세요")
 
     def _status(self, msg: str) -> None:
         self.status_label.setText(msg)
@@ -457,3 +548,4 @@ class MainWindow(QMainWindow):
         if self.link is not None:
             self.link.close()
         super().closeEvent(event)
+

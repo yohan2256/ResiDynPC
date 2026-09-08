@@ -177,6 +177,9 @@ class FirmwareDialog(QDialog):
 
     def _finish(self) -> None:
         self._worker = None
+        if getattr(self, "_close_requested", False):
+            super().reject()
+            return
         self.btn_run.setEnabled(self._data is not None)
         self.btn_pick.setEnabled(True)
 
@@ -184,10 +187,10 @@ class FirmwareDialog(QDialog):
         self.log.appendPlainText(msg)
 
     def reject(self) -> None:
-        # 워커는 대기 지점에서만 멈춘다. 쓰기 도중이라면 끝까지 두고 기다린다 —
-        # 절반만 기록된 플래시로 창을 닫는 것보다 잠깐 기다리는 편이 낫다.
+        # Never destroy a running QThread while a flash write is in progress.
         if self._worker is not None:
+            self._close_requested = True
             self._worker.cancel()
-            self._worker.wait(5000)
-            self._worker = None
+            self._say("안전하게 작업을 마친 뒤 창을 닫습니다.")
+            return
         super().reject()

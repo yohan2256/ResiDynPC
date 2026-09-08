@@ -173,3 +173,37 @@ def test_firmware_dialog_rejects_a_bad_file_without_arming_the_button(qapp, tmp_
         assert d._data == firmware.bundled_uf2()[0]
     finally:
         d.close()
+
+
+
+def test_fault_flag_blocks_analysis_and_export(win):
+    win._on_frames([DataFrame(0, 1, 0, [(0,0,100)]*600)])
+    win.run_analysis()
+    assert win.result is None
+    assert not win.btn_report.isEnabled()
+    assert win.quality_error is not None
+
+
+def test_axis_change_clears_capture(win):
+    _feed(win, np.arange(1000))
+    win.axis_combo.setCurrentText("AY")
+    assert win.samples().size == 0
+    assert win.capture_axis == "AY"
+
+
+def test_settings_change_invalidates_old_analysis(win):
+    t=np.arange(6400)/3200
+    _feed(win,np.rint(1000*np.exp(-5*t)*np.sin(2*np.pi*42*t)))
+    win.run_analysis()
+    assert win.result is not None
+    win.mass_spin.setValue(10)
+    assert win.result is None
+    assert not win.btn_report.isEnabled()
+
+
+def test_file_rate_has_priority_over_previous_connection(win):
+    from types import SimpleNamespace
+    win.link=SimpleNamespace(measured_odr_hz=3300.,close=lambda:None)
+    win.loaded_fs=3100.
+    assert win.fs == 3100.
+    win.link=None

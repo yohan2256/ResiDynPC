@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import math
 
 # 현장 측정은 하중판을 2시간만 올려두는데 기준은 48시간 존치 값이다.
 CORRECTION_48H = 1.25
@@ -26,13 +27,18 @@ class Grade(Enum):
         return self.value
 
 
-def convert_48h(measured_mn_m3: float) -> float:
-    return measured_mn_m3 * CORRECTION_48H
+def convert_48h(measured_mn_m3: float, factor: float = CORRECTION_48H) -> float:
+    if not math.isfinite(measured_mn_m3) or measured_mn_m3 <= 0 or not math.isfinite(factor) or factor <= 0:
+        raise ValueError("유효하지 않은 측정값 또는 환산계수")
+    return measured_mn_m3 * factor
 
 
-def grade(mn_m3_for_48h: float) -> Grade:
-    if mn_m3_for_48h <= EXCELLENT_MAX_MN_M3:
+def grade(mn_m3_for_48h: float, excellent: float = EXCELLENT_MAX_MN_M3, limit: float = PASS_MAX_MN_M3) -> Grade:
+    if not (math.isfinite(mn_m3_for_48h) and mn_m3_for_48h > 0 and 0 < excellent <= limit and math.isfinite(limit)):
+        raise ValueError("판정값 또는 판정 기준 오류")
+    if mn_m3_for_48h <= excellent:
         return Grade.EXCELLENT
-    if mn_m3_for_48h <= PASS_MAX_MN_M3:
+    if mn_m3_for_48h <= limit:
         return Grade.PASS
     return Grade.FAIL
+
